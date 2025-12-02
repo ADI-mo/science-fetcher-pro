@@ -18,7 +18,7 @@ DATA_SERIES = defaultdict(list)
 class GrowthApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Microbial Growth Analyzer - Pro Version")
+        self.root.title("Microbial Growth Analyzer - Pro Version (With Replicates)")
         
         # Get standard matplotlib colors for cycling
         self.colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
@@ -94,7 +94,7 @@ class GrowthApp:
         
         # Buttons
         ttk.Button(btn_grid, text="Add Point", command=self.add_point).pack(side="left", fill="x", expand=True, padx=2)
-        ttk.Button(btn_grid, text="Edit Point", command=self.edit_point).pack(side="left", fill="x", expand=True, padx=2) # NEW BUTTON
+        ttk.Button(btn_grid, text="Edit Point", command=self.edit_point).pack(side="left", fill="x", expand=True, padx=2) 
         ttk.Button(btn_grid, text="Remove", command=self.remove_point).pack(side="left", fill="x", expand=True, padx=2)
         
         ttk.Button(entry_frame, text="Load from Excel", command=self.load_file).pack(fill="x", padx=5, pady=2)
@@ -222,7 +222,7 @@ class GrowthApp:
             messagebox.showerror("Input Error", str(e))
 
     def edit_point(self):
-        """NEW: Loads selected point into inputs and removes it from list."""
+        """Loads selected point into inputs and removes it from list."""
         selected_item = self.tree.selection()
         if not selected_item:
             messagebox.showwarning("Edit Point", "Please select a row to edit.")
@@ -233,32 +233,28 @@ class GrowthApp:
         series_name = vals[0]
         time_val = float(vals[1])
         
-        # Find the actual data point
         if series_name in DATA_SERIES:
             points = DATA_SERIES[series_name]
             target_pt = None
             idx_to_remove = -1
             
             for i, p in enumerate(points):
-                if abs(p['t'] - time_val) < 1e-6:
+                if abs(p['t'] - time_val) < 1e-6: # Using tolerance for float compare
                     target_pt = p
                     idx_to_remove = i
                     break
             
             if target_pt:
-                # 1. Fill Inputs
                 self.entry_name.delete(0, tk.END)
                 self.entry_name.insert(0, series_name)
                 
                 self.entry_t.delete(0, tk.END)
                 self.entry_t.insert(0, str(target_pt['t']))
                 
-                # Check mode consistency before filling value
                 if self.measure_type.get() != target_pt['type']:
                     self.measure_type.set(target_pt['type'])
-                    self.update_input_fields() # Force refresh fields
+                    self.update_input_fields()
                 
-                # Fill specific values
                 self.entry_val.delete(0, tk.END)
                 if target_pt['type'] == 'OD':
                     self.entry_val.insert(0, str(target_pt['od']))
@@ -267,7 +263,6 @@ class GrowthApp:
                     self.entry_dil.delete(0, tk.END)
                     self.entry_dil.insert(0, str(target_pt['dil']))
                 
-                # 2. Remove the old point
                 points.pop(idx_to_remove)
                 if not points: del DATA_SERIES[series_name]
                 
@@ -287,6 +282,7 @@ class GrowthApp:
         
         if series_name in DATA_SERIES:
             points = DATA_SERIES[series_name]
+            # Warning: this deletes the first matching time point found
             for i, p in enumerate(points):
                 if abs(p['t'] - time_val) < 1e-6:
                     points.pop(i)
@@ -309,15 +305,11 @@ class GrowthApp:
         except:
             blank, factor, vol = 0, 0, 0.01
 
-        # Get sorted list of series names to ensure consistent coloring
         series_names = sorted(DATA_SERIES.keys())
 
         for idx, name in enumerate(series_names):
             points = DATA_SERIES[name]
-            # Determine color based on index
             color = self.colors[idx % len(self.colors)]
-            
-            # Create a tag for this series color
             self.tree.tag_configure(name, foreground=color)
 
             for p in points:
@@ -331,7 +323,6 @@ class GrowthApp:
                         calc_val = calculate_cfu_from_plate(p['count'], p['dil'], vol)
                     except: calc_val = 0
                 
-                # Insert with tag
                 self.tree.insert('', 'end', values=(name, p['t'], raw, f"{calc_val:.2e}"), tags=(name,))
 
     def clear_all(self):
@@ -341,40 +332,16 @@ class GrowthApp:
         self.canvas.draw()
         for i in self.res_tree.get_children(): self.res_tree.delete(i)
 
-    def load_file(self):
-        filepath = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
-        if not filepath: return
-        name = self.entry_name.get()
-        mode = self.measure_type.get()
-        
-        if not self.check_data_consistency(mode): return
-
-        try:
-            wb = openpyxl.load_workbook(filepath, data_only=True)
-            ws = wb.active
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if not row or row[0] is None: continue
-                t = float(row[0])
-                if mode == "OD" and len(row) >= 2:
-                    val = float(row[1])
-                    DATA_SERIES[name].append({"t": t, "type": "OD", "od": val})
-                elif mode == "CFU" and len(row) >= 3:
-                    count = float(row[1])
-                    dil = float(row[2])
-                    DATA_SERIES[name].append({"t": t, "type": "CFU", "count": count, "dil": dil})
-            self.update_data_table()
-            messagebox.showinfo("Success", f"Loaded data into '{name}'")
-        except Exception as e:
-            messagebox.showerror("Error", str(e))
-
     def run_analysis(self):
+        """
+        Calculates k based on ALL points (raw data), but plots Mean + Error Bars.
+        """
         self.ax.clear()
         for i in self.res_tree.get_children(): self.res_tree.delete(i)
         
         unit = self.time_unit_var.get()
         mode = self.measure_type.get() 
 
-        # Update headers
         self.res_tree.heading("k", text=f"k (gen/{unit})")
         self.res_tree.heading("td", text=f"Doubling Time ({unit})")
 
@@ -391,13 +358,15 @@ class GrowthApp:
             return
 
         analysis_results = []
-        series_names = sorted(DATA_SERIES.keys()) # Ensure order matches table color
+        series_names = sorted(DATA_SERIES.keys())
 
         for i, name in enumerate(series_names):
             points = DATA_SERIES[name]
             points.sort(key=lambda x: x["t"])
+            
             times, log_cfus = [], []
             
+            # 1. Collect Raw Data (All Replicates)
             for p in points:
                 t = p["t"]
                 cfu = 0
@@ -411,73 +380,35 @@ class GrowthApp:
                     log_cfus.append(np.log2(cfu))
 
             if len(times) < 2: continue
-
+            
+            # 2. Calculate Growth Rate (using RAW data for best statistical fit)
             real_cfus = [2**y for y in log_cfus]
             k, r2, (start, end) = find_best_growth_phase(times, real_cfus)
             td = calculate_doubling_time(k)
-            
             analysis_results.append([name, f"{k:.3f}", f"{td:.2f}", f"{r2:.3f}"])
-
-            # Use same color cycle logic
-            color = self.colors[i % len(self.colors)]
-            self.ax.scatter(times, log_cfus, color=color, alpha=0.5, label=f"{name}")
-            
-            fit_t = times[start:end]
-            fit_log = log_cfus[start:end]
-            if len(fit_t) > 1:
-                slope = k
-                intercept = np.mean(fit_log) - slope * np.mean(fit_t)
-                x_line = np.linspace(min(fit_t), max(fit_t), 10)
-                y_line = slope * x_line + intercept
-                self.ax.plot(x_line, y_line, color=color, linewidth=2)
-
             self.res_tree.insert('', 'end', values=(name, f"{k:.3f}", f"{td:.2f}", f"{r2:.3f}"))
 
-        self.ax.set_xlabel(f"Time ({unit})")
-        if mode == "OD":
-             self.ax.set_ylabel("Log2(Est. CFU/ml)")
-        else:
-             self.ax.set_ylabel("Log2(CFU/ml)")
+            color = self.colors[i % len(self.colors)]
 
-        self.ax.legend()
-        self.ax.grid(True, alpha=0.3)
-        self.canvas.draw()
-        
-        self.last_results = analysis_results
+            # 3. VISUALIZATION: Aggregate Replicates (Mean + Std Dev)
+            # Group by time for plotting
+            unique_times = sorted(list(set(times)))
+            mean_logs = []
+            std_logs = []
 
-    def export_report(self):
-        try:
-            filepath = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG Image", "*.png")])
-            if not filepath: return
+            for t_point in unique_times:
+                # Find all log values for this time point
+                vals = [l for tm, l in zip(times, log_cfus) if tm == t_point]
+                mean_logs.append(np.mean(vals))
+                std_logs.append(np.std(vals)) # Standard Deviation
 
-            if hasattr(self, 'last_results') and self.last_results:
-                columns = ["Series", f"k (/{self.time_unit_var.get()})", f"Td ({self.time_unit_var.get()})", "R2"]
-                table_data = [columns] + self.last_results
-                
-                the_table = plt.table(cellText=table_data,
-                                      loc='bottom',
-                                      cellLoc='center',
-                                      bbox=[0.0, -0.4, 1.0, 0.25])
-                the_table.auto_set_font_size(False)
-                the_table.set_fontsize(9)
-                plt.subplots_adjust(left=0.1, bottom=0.3)
+            # Plot with Error Bars
+            self.ax.errorbar(unique_times, mean_logs, yerr=std_logs, 
+                             fmt='o', color=color, capsize=4, label=f"{name}", alpha=0.7)
             
-            self.fig.savefig(filepath, bbox_inches='tight')
+            # Plot Regression Line (on the fitted segment)
+            fit_t = times[start:end] 
+            fit_log = log_cfus[start:end]
             
-            # FIX: Properly clear tables for different Matplotlib versions
-            plt.subplots_adjust(bottom=0.1)
-            del self.ax.tables[:] # Replaces .clear() which caused the error
-            self.canvas.draw()
-
-            if messagebox.askyesno("Export Success", "Open file now?"):
-                sys_plat = platform.system()
-                if sys_plat == 'Windows': os.startfile(filepath)
-                elif sys_plat == 'Darwin': subprocess.run(['open', filepath], check=True)
-                else: subprocess.run(['xdg-open', filepath], check=True)
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not save: {e}")
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = GrowthApp(root)
-    root.mainloop()
+            if len(fit_t) > 1:
+                # Calculate simple line
