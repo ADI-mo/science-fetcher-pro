@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+search_history.log
+results_*.txt
+.DS_Store
