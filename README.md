@@ -134,5 +134,5 @@ The system scans the following databases simultaneously:
 
 **Happy Researching\! 🎓**
 
-```
+``` העבר לקובץ  אחיד  
 ```
