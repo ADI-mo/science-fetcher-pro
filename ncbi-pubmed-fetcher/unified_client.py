@@ -1,9 +1,9 @@
 import requests
 import concurrent.futures
 import datetime
+import csv
 from ncbi_client import NCBIClient
 
-# --- HELPERS ---
 def get_current_year():
     return datetime.datetime.now().year
 
@@ -12,27 +12,26 @@ class PubMedWrapper:
     def __init__(self):
         self.client = NCBIClient()
     
-    def search(self, term, start_year=None, max_results=5):
+    def search(self, term, start_year=None, max_results=5, only_free=False):
         try:
             final_term = term
             if start_year:
                 current_year = get_current_year()
-                final_term = f"{term} AND {start_year}:{current_year}[dp]"
+                final_term += f" AND {start_year}:{current_year}[dp]"
             
+            # פילטר לגישה חופשית ב-PubMed
+            if only_free:
+                final_term += " AND (free full text[Filter])"
+
             ids = self.client.search_pubmed(final_term, max_results)
             data = self.client.fetch_details(ids)
             
             for item in data:
                 item['source'] = "PubMed"
-                item['citations'] = "N/A"
-                item['pdf_url'] = "N/A"
+                item['citations'] = 0 # PubMed rarely gives this
+                item['pdf_url'] = "Check Link"
                 pmid = item.get('pmid')
-                if pmid:
-                    item['url'] = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-                    if 'doi' not in item:
-                        item['doi'] = None 
-                else:
-                    item['url'] = "https://pubmed.ncbi.nlm.nih.gov/"
+                item['url'] = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/" if pmid else "https://pubmed.ncbi.nlm.nih.gov/"
             return data
         except Exception as e:
             print(f"PubMed Error: {e}")
@@ -42,41 +41,36 @@ class PubMedWrapper:
 class SemanticScholarClient:
     BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
     
-    def search(self, term, start_year=None, max_results=5):
-        year_range = ""
-        if start_year:
-            year_range = f"{start_year}-{get_current_year()}"
-
+    def search(self, term, start_year=None, max_results=5, only_free=False):
         params = {
             "query": term, 
             "limit": max_results, 
             "fieldsOfStudy": "Biology,Medicine",
             "fields": "title,authors,year,abstract,journal,url,isOpenAccess,openAccessPdf,citationCount,externalIds"
         }
+        if start_year:
+            params["year"] = f"{start_year}-{get_current_year()}"
         
-        if year_range:
-            params["year"] = year_range
-
+        # Semantic Scholar filter logic happens partly in parsing
         try:
             r = requests.get(self.BASE_URL, params=params, headers={"User-Agent": "Bot"}, timeout=10).json()
-            return self._parse(r)
-        except Exception as e:
-            print(f"Semantic Error: {e}")
-            return []
+            results = self._parse(r)
+            
+            if only_free:
+                # מסנן רק אם יש PDF זמין
+                return [r for r in results if r['pdf_url'] != "N/A"]
+            return results
+        except: return []
 
     def _parse(self, data):
         res = []
         for p in data.get("data", []):
             auth = ", ".join([a["name"] for a in p.get("authors", [])[:3]])
-            
-            pdf_link = "N/A"
-            if p.get("openAccessPdf"):
-                pdf_link = p.get("openAccessPdf", {}).get("url", "N/A")
-            
+            pdf_link = p.get("openAccessPdf", {}).get("url", "N/A") if p.get("openAccessPdf") else "N/A"
             doi = p.get("externalIds", {}).get("DOI")
 
             res.append({
-                "title": p.get("title"), 
+                "title": p.get("title") or "Unknown Title", 
                 "journal": p.get("journal",{}).get("name","Semantic Scholar"), 
                 "year": str(p.get("year","")), 
                 "authors": auth, 
@@ -89,24 +83,22 @@ class SemanticScholarClient:
             })
         return res
 
-# --- 3. Europe PMC Client (Fixed!) ---
+# --- 3. Europe PMC Client ---
 class EuropePmcClient:
     BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
     
-    def search(self, term, start_year=None, max_results=5):
-        # Simplified query to ensure results
+    def search(self, term, start_year=None, max_results=5, only_free=False):
         query = term
         if start_year:
             query += f" AND PUB_YEAR:[{start_year} TO {get_current_year()}]"
+        
+        if only_free:
+            query += " AND (OPEN_ACCESS:y)"
 
         params = {"query": query, "format": "json", "pageSize": max_results}
         try:
-            response = requests.get(self.BASE_URL, params=params, timeout=10)
-            response.raise_for_status() # This will catch 404/500 errors
-            return self._parse(response.json())
-        except Exception as e:
-            print(f"EuropePMC Error: {e}") # This will print why it failed!
-            return []
+            return self._parse(requests.get(self.BASE_URL, params=params, timeout=10).json())
+        except: return []
 
     def _parse(self, data):
         res = []
@@ -114,8 +106,8 @@ class EuropePmcClient:
             pmid = i.get("id")
             doi = i.get("doi")
             url = f"https://europepmc.org/article/MED/{pmid}" if pmid else "N/A"
-            
             cites = i.get("citedByCount", 0)
+            
             pdf = "N/A"
             if i.get("fullTextUrlList"):
                 for link in i.get("fullTextUrlList", {}).get("fullTextUrl", []):
@@ -124,7 +116,7 @@ class EuropePmcClient:
                         break
 
             res.append({
-                "title": i.get("title"), 
+                "title": i.get("title") or "Unknown Title", 
                 "journal": i.get("journalInfo",{}).get("journal",{}).get("title","EuropePMC"), 
                 "year": i.get("journalInfo",{}).get("yearOfPublication","N/A"), 
                 "authors": i.get("authorString",""), 
@@ -137,15 +129,19 @@ class EuropePmcClient:
             })
         return res
 
-# --- 4. OpenAlex Client ---
+# --- 4. OpenAlex Client (Fixed: Articles only) ---
 class OpenAlexClient:
     BASE_URL = "https://api.openalex.org/works"
     
-    def search(self, term, start_year=None, max_results=5):
+    def search(self, term, start_year=None, max_results=5, only_free=False):
         try:
-            filters = "has_abstract:true,language:en"
+            # הוספתי type:article כדי להעיף ספרים
+            filters = "has_abstract:true,language:en,type:article"
             if start_year:
                 filters += f",from_publication_date:{start_year}-01-01"
+            
+            if only_free:
+                filters += ",is_oa:true"
 
             params = {
                 "search": term, 
@@ -154,9 +150,7 @@ class OpenAlexClient:
                 "sort": "cited_by_count:desc"
             }
             return self._parse(requests.get(self.BASE_URL, params=params, timeout=10).json())
-        except Exception as e:
-            print(f"OpenAlex Error: {e}")
-            return []
+        except: return []
 
     def _parse(self, data):
         res = []
@@ -177,7 +171,7 @@ class OpenAlexClient:
             pdf_url = i.get("open_access", {}).get("oa_url", "N/A")
 
             res.append({
-                "title": i.get("display_name"), 
+                "title": i.get("display_name") or "Unknown Title", 
                 "journal": i.get("primary_location",{}).get("source",{}).get("display_name","OpenAlex"),
                 "year": str(i.get("publication_year","")), 
                 "authors": auth, 
@@ -190,31 +184,41 @@ class OpenAlexClient:
             })
         return res
 
-# --- 5. PLOS Client ---
+# --- 5. PLOS Client (Fixed Authors) ---
 class PlosClient:
     BASE_URL = "http://api.plos.org/search"
-    def search(self, term, start_year=None, max_results=5):
+    def search(self, term, start_year=None, max_results=5, only_free=False):
         try:
+            # PLOS is always free :)
             q = f'title:"{term}" OR abstract:"{term}"'
             if start_year:
                  q += f' AND publication_date:[{start_year}-01-01T00:00:00Z TO *]'
             
             r = requests.get(self.BASE_URL, params={"q": q, "wt":"json", "rows":max_results, "fl":"id,title,journal,auth_display,abstract,publication_date,score"}, timeout=10).json()
             return self._parse(r)
-        except Exception as e:
-            print(f"PLOS Error: {e}")
-            return []
-
+        except: return []
+    
     def _parse(self, data):
         res = []
         for d in data.get("response", {}).get("docs", []):
             doi = d.get("id", "")
             url = f"https://journals.plos.org/plosone/article?id={doi}" if doi else "N/A"
+            
+            # Fix authors parsing
+            authors_list = d.get("auth_display", [])
+            authors_str = ", ".join(authors_list) if isinstance(authors_list, list) else str(authors_list)
+
             res.append({
-                "title": d.get("title"), "journal": d.get("journal","PLOS"), 
-                "year": d.get("publication_date","")[:4], "authors": ",".join(d.get("auth_display",[])), 
-                "abstract": str(d.get("abstract",["N/A"])[0]), "source": "PLOS", "url": url,
-                "citations": "N/A", "pdf_url": "N/A", "doi": doi
+                "title": d.get("title") or "Unknown Title", 
+                "journal": d.get("journal","PLOS"), 
+                "year": d.get("publication_date","")[:4], 
+                "authors": authors_str, 
+                "abstract": str(d.get("abstract",["N/A"])[0]), 
+                "source": "PLOS", 
+                "url": url,
+                "citations": 0, 
+                "pdf_url": url, # PLOS is open access, main link is fine
+                "doi": doi
             })
         return res
 
@@ -237,7 +241,7 @@ class UnifiedSearchManager:
             "PLOS"
         ]
 
-    def search_all(self, term, active_sources=None, limit_per_source=5, start_year=None):
+    def search_all(self, term, active_sources=None, limit_per_source=5, start_year=None, only_free=False):
         if active_sources is None: active_sources = self.clients.keys()
         
         if start_year is None:
@@ -248,7 +252,7 @@ class UnifiedSearchManager:
             future_to_source = {}
             for name in active_sources:
                 if name in self.clients:
-                    future_to_source[executor.submit(self.clients[name].search, term, start_year, limit_per_source)] = name
+                    future_to_source[executor.submit(self.clients[name].search, term, start_year, limit_per_source, only_free)] = name
             
             for future in concurrent.futures.as_completed(future_to_source):
                 try:
@@ -259,7 +263,7 @@ class UnifiedSearchManager:
         merged = self._merge_and_deduplicate(all_results)
         enriched = self._enrich_missing_data(merged)
         
-        # Sort by citations (safely handling N/A)
+        # Sort by citations (Impact)
         enriched.sort(key=lambda x: int(x.get('citations', 0)) if isinstance(x.get('citations'), int) else 0, reverse=True)
         
         return enriched
@@ -287,65 +291,58 @@ class UnifiedSearchManager:
             if norm_title not in seen_titles:
                 seen_titles.add(norm_title)
                 final_list.append(item)
-                
         return final_list
 
     def _enrich_missing_data(self, results):
+        """If impact/citations are missing (0), try to fetch from OpenAlex"""
         for item in results:
-            abstract = item.get('abstract', '')
             doi = item.get('doi')
             
-            is_empty = not abstract or abstract == "No Abstract Available." or len(abstract) < 50
+            # --- התיקון הקריטי למניעת קריסה ---
+            abstract_text = item.get('abstract') or ""
+            needs_abstract = len(abstract_text) < 50
             
-            if is_empty and doi:
+            needs_citations = item.get('citations') == 0
+            
+            if (needs_abstract or needs_citations) and doi:
                 try:
                     clean_doi = doi.replace("https://doi.org/", "")
                     url = f"https://api.openalex.org/works/https://doi.org/{clean_doi}"
                     r = requests.get(url, timeout=3)
                     if r.status_code == 200:
                         data = r.json()
-                        abs_idx = data.get("abstract_inverted_index")
-                        if abs_idx:
-                            word_list = sorted([(pos, w) for w, positions in abs_idx.items() for pos in positions])
-                            new_abstract = " ".join([w[1] for w in word_list])
-                            item['abstract'] = new_abstract + " [Enriched via OpenAlex]"
                         
+                        # Enrich Abstract
+                        if needs_abstract:
+                            abs_idx = data.get("abstract_inverted_index")
+                            if abs_idx:
+                                word_list = sorted([(pos, w) for w, positions in abs_idx.items() for pos in positions])
+                                new_abstract = " ".join([w[1] for w in word_list])
+                                item['abstract'] = new_abstract + " [Enriched]"
+                        
+                        # Enrich PDF
                         if item.get('pdf_url') == "N/A":
                              item['pdf_url'] = data.get("open_access", {}).get("oa_url", "N/A")
                         
-                        if item.get('citations') == "N/A":
+                        # Enrich Citations (Impact)
+                        if needs_citations:
                              item['citations'] = data.get("cited_by_count", 0)
 
                 except Exception: pass
         return results
 
-    def save_data(self, data, filename):
+    def save_to_csv(self, data, filename):
+        """New Feature: Save as CSV/Excel compatible"""
+        keys = ["source", "title", "citations", "year", "journal", "authors", "url", "pdf_url", "abstract"]
         try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write("================================================================\n")
-                f.write("  SCIENTIFIC SEARCH RESULTS EXPORT (PRO EDITION)\n")
-                f.write("================================================================\n\n")
-                
-                for i, item in enumerate(data, 1):
-                    source = item.get('source', 'Unknown')
-                    title = item.get('title', 'No Title')
-                    url = item.get('url', 'N/A')
-                    pdf = item.get('pdf_url', 'N/A')
-                    cites = item.get('citations', 'N/A')
-                    authors = item.get('authors', 'N/A')
-                    journal = item.get('journal', 'N/A')
-                    year = item.get('year', 'N/A')
-                    abstract = item.get('abstract', 'No Abstract')
-
-                    f.write(f"Result #{i}  [{source}]\n")
-                    f.write(f"Impact: {cites} citations\n")
-                    f.write("-" * 40 + "\n")
-                    f.write(f"TITLE:    {title}\n")
-                    f.write(f"LINK:     {url}\n")
-                    f.write(f"PDF:      {pdf}\n")
-                    f.write(f"JOURNAL:  {journal} ({year})\n")
-                    f.write(f"AUTHORS:  {authors}\n")
-                    f.write(f"\nABSTRACT:\n{abstract}\n")
-                    f.write("\n" + "="*80 + "\n\n")
+            with open(filename, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.DictWriter(f, fieldnames=keys)
+                writer.writeheader()
+                for item in data:
+                    # Filter only keys we want
+                    filtered_item = {k: item.get(k, "N/A") for k in keys}
+                    writer.writerow(filtered_item)
             return True
-        except IOError: return False
+        except Exception as e:
+            print(f"CSV Error: {e}")
+            return False
