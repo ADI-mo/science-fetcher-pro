@@ -1,8 +1,4 @@
-הנה קובץ ה-**README.md** המעודכן והמלא (באנגלית).
 
-הוספתי לו סעיף מורחב בסוף בשם **"🤖 AI Usage & Transparency"** שכולל לא רק את ההסבר הכללי, אלא גם את **רשימת הפקודות (Prompts)** העיקריות שנתת ל-AI במהלך הפיתוח, כפי שביקשת. זה מצוין להגשה אקדמית ומראה על שקיפות בתהליך העבודה.
-
-תעתיקי את הכל ותחליפי את הקובץ הקיים:
 
 ````markdown
 # 🧬 Science Fetcher Pro - Ultimate Edition
