@@ -54,21 +54,6 @@ Open your Terminal (or CMD) and run the following command:
 ```bash
 pip install requests
 
-````markdown
-
-
-*(This is the only external library required. All others - `tkinter`, `csv`, `json`, `threading` - are built-in).*
-
-### 3\. (Optional) Create an EXE file
-
-If you want to turn the script into a standalone software file (to share with friends):
-
-```bash
-pip install pyinstaller
-```
-
------
-
 ## ▶️ How to Run?
 
 ### Option A: Running the Code (For Developers)
